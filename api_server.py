@@ -113,6 +113,7 @@ class GenerateRequest(BaseModel):
 class DeployRequest(BaseModel):
     session_id: str
     github_org: str | None = None
+    github_token: str | None = None
 
 class DiscoverRequest(BaseModel):
     session_id: str
@@ -621,6 +622,7 @@ async def api_deploy(req: DeployRequest):
             description=f"Auto-generated MCP server for {api_spec.title}",
             org=req.github_org,
             open_dashboard=False,
+            github_token=req.github_token,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deploy failed: {e}")

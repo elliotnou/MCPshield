@@ -14,6 +14,7 @@ export default function DeployPage() {
   const router = useRouter();
   const { deployInfo, runDeploy, generated, loading, error, dedalusUser } = usePipeline();
   const [copied, setCopied] = useState<string | null>(null);
+  const [githubToken, setGithubToken] = useState("");
 
   if (!generated) {
     return (
@@ -29,7 +30,8 @@ export default function DeployPage() {
   }
 
   const handleDeploy = async () => {
-    await runDeploy();
+    if (!githubToken.trim()) return;
+    await runDeploy(githubToken.trim());
   };
 
   const copyToClipboard = (text: string, key: string) => {
@@ -57,16 +59,38 @@ export default function DeployPage() {
             <div className="text-center space-y-2">
               <h3 className="text-lg font-bold text-foreground">Ready to deploy</h3>
               <p className="text-sm text-muted-foreground max-w-md">
-                This will create a GitHub repository under your personal account with your generated MCP server and provide instructions to deploy it on Dedalus.
+                Enter your GitHub personal access token to create a repository under your account with the generated MCP server.
               </p>
             </div>
+
+            {/* GitHub token input */}
+            <div className="w-full max-w-md space-y-2">
+              <label className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
+                <Key className="w-3.5 h-3.5" />
+                GitHub Personal Access Token
+              </label>
+              <input
+                type="password"
+                value={githubToken}
+                onChange={(e) => setGithubToken(e.target.value)}
+                placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                className="w-full h-10 px-3 rounded-lg bg-background border border-border/50 text-sm font-mono text-foreground placeholder:text-muted-foreground/40 focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary/50 transition-all"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Needs <code className="text-primary/70">repo</code> scope.{" "}
+                <a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer" className="text-primary hover:underline">
+                  Create one here
+                </a>
+              </p>
+            </div>
+
             {error && (
               <div className="flex items-center gap-2 p-3 rounded-lg bg-destructive/10 border border-destructive/20 text-sm text-destructive max-w-md">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 {error}
               </div>
             )}
-            <Button onClick={handleDeploy} className="btn-gradient rounded-full px-8 h-12 relative z-10">
+            <Button onClick={handleDeploy} disabled={!githubToken.trim()} className="btn-gradient rounded-full px-8 h-12 relative z-10">
               <GitBranch className="w-4 h-4" />
               <span>Push to GitHub & Deploy</span>
             </Button>

@@ -126,7 +126,7 @@ interface PipelineContextValue extends PipelineState {
   updatePolicies: (policies: { name: string; safety: string; auto_execute: boolean; rate_limit_qpm: number }[]) => Promise<void>;
   runGenerate: (serverName?: string) => Promise<void>;
   runTest: () => Promise<void>;
-  runDeploy: (githubOrg?: string) => Promise<void>;
+  runDeploy: (githubToken: string, githubOrg?: string) => Promise<void>;
   reset: () => void;
 }
 
@@ -312,14 +312,14 @@ export function PipelineProvider({ children }: { children: ReactNode }) {
     }
   }, [state.sessionId]);
 
-  const runDeploy = useCallback(async (githubOrg?: string) => {
+  const runDeploy = useCallback(async (githubToken: string, githubOrg?: string) => {
     if (!state.sessionId) return;
     setLoading(true);
     try {
       const res = await fetch(`${API_BASE}/api/deploy`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: state.sessionId, github_org: githubOrg || null }),
+        body: JSON.stringify({ session_id: state.sessionId, github_token: githubToken || null, github_org: githubOrg || null }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ detail: res.statusText }));

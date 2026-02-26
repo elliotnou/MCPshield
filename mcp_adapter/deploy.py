@@ -6,7 +6,8 @@ Flow:
   3. Open the Dedalus dashboard for the user to connect the repo
 
 Requires:
-  - GITHUB_TOKEN env var (personal access token with 'repo' scope)
+  - A GitHub personal access token with 'repo' scope
+    (provided by the end user at deploy time, or GITHUB_TOKEN env var as fallback)
   - git available on PATH
 """
 
@@ -26,13 +27,14 @@ GITHUB_API = "https://api.github.com"
 DEDALUS_DASHBOARD = "https://www.dedaluslabs.ai/dashboard/servers"
 
 
-def _get_github_token() -> str:
-    token = os.getenv("GITHUB_TOKEN", "")
+def _get_github_token(user_token: str | None = None) -> str:
+    """Return a valid GitHub token, preferring the user-supplied one."""
+    token = user_token or os.getenv("GITHUB_TOKEN", "")
     if not token:
         raise RuntimeError(
-            "GITHUB_TOKEN is not set. "
-            "Create a personal access token at https://github.com/settings/tokens "
-            "with 'repo' scope and add it to your .env file."
+            "No GitHub token provided. "
+            "Enter your personal access token (https://github.com/settings/tokens) "
+            "with 'repo' scope on the deploy page."
         )
     return token
 
@@ -191,13 +193,14 @@ def deploy(
     org: str | None = None,
     private: bool = False,
     open_dashboard: bool = True,
+    github_token: str | None = None,
 ) -> dict:
     """Full deployment: create GitHub repo → push → open Dedalus dashboard.
 
     Returns a dict with deployment info including env vars from manifest.
     """
     logger = get_logger()
-    token = _get_github_token()
+    token = _get_github_token(github_token)
 
     # Read deployment manifest for env vars
     manifest = _read_manifest(output_dir)
