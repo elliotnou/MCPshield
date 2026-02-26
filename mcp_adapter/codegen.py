@@ -1,4 +1,4 @@
-"""MCP server code generator.
+"""Server code synthesis — produce a runnable MCP server from tool definitions.
 
 Takes a list of ToolDefinitions + APISpec metadata and produces a
 fully-functional Python MCP server file (using dedalus_mcp) plus
@@ -40,14 +40,14 @@ _PY_TYPE_MAP = {
 }
 
 
-def _py_type(json_type: str, required: bool) -> str:
+def _map_json_to_py(json_type: str, required: bool) -> str:
     base = _PY_TYPE_MAP.get(json_type, "str")
     if not required:
         return f"{base} | None"
     return base
 
 
-def _py_default(param: ToolParam) -> str:
+def _default_literal(param: ToolParam) -> str:
     if param.default is not None:
         if isinstance(param.default, str):
             return f' = "{param.default}"'
@@ -57,7 +57,7 @@ def _py_default(param: ToolParam) -> str:
     return ""
 
 
-def _safe_identifier(name: str) -> str:
+def _sanitize_name(name: str) -> str:
     """Ensure name is a valid Python identifier."""
     name = re.sub(r"[^a-zA-Z0-9_]", "_", name)
     if name and name[0].isdigit():
@@ -68,21 +68,21 @@ def _safe_identifier(name: str) -> str:
 # ── Code fragments ─────────────────────────────────────────────────────────
 
 
-def _build_signature(tool: ToolDefinition) -> str:
+def _render_signature(tool: ToolDefinition) -> str:
     """Build the function parameter signature string."""
     parts: list[str] = []
     # Required params first, then optional
     required = [p for p in tool.params if p.required]
     optional = [p for p in tool.params if not p.required]
     for p in required + optional:
-        name = _safe_identifier(p.name)
-        typ = _py_type(p.json_type, p.required)
-        default = _py_default(p)
+        name = _sanitize_name(p.name)
+        typ = _map_json_to_py(p.json_type, p.required)
+        default = _default_literal(p)
         parts.append(f"{name}: {typ}{default}")
     return ", ".join(parts)
 
 
-def _build_path_format(tool: ToolDefinition) -> str:
+def _format_path_template(tool: ToolDefinition) -> str:
     """Build an f-string path, replacing {paramName} with {param_name}."""
     if not tool.endpoints:
         return "/"
@@ -90,17 +90,17 @@ def _build_path_format(tool: ToolDefinition) -> str:
     # Replace {camelCase} placeholders with {snake_case} python vars
     def _replace(m: re.Match) -> str:
         raw = m.group(1)
-        return "{" + _safe_identifier(raw) + "}"
+        return "{" + _sanitize_name(raw) + "}"
     return re.sub(r"\{([^}]+)\}", _replace, path)
 
 
-def _build_tool_body(tool: ToolDefinition) -> str:
+def _render_tool_body(tool: ToolDefinition) -> str:
     """Build the function body that makes the HTTP call."""
     if not tool.endpoints:
         return '    return "No endpoint configured"'
 
     ep = tool.endpoints[0]
-    path_fmt = _build_path_format(tool)
+    path_fmt = _format_path_template(tool)
     method = ep.method.value
 
     lines: list[str] = []
@@ -143,7 +143,7 @@ def _build_tool_body(tool: ToolDefinition) -> str:
     if query_params:
         lines.append("    params: dict[str, Any] = {}")
         for p in query_params:
-            name = _safe_identifier(p.name)
+            name = _sanitize_name(p.name)
             if p.required:
                 lines.append(f'    params["{p.name}"] = {name}')
             else:
@@ -153,7 +153,7 @@ def _build_tool_body(tool: ToolDefinition) -> str:
     if body_params and method in ("POST", "PUT", "PATCH"):
         lines.append("    body: dict[str, Any] = {}")
         for p in body_params:
-            name = _safe_identifier(p.name)
+            name = _sanitize_name(p.name)
             if p.required:
                 lines.append(f'    body["{p.name}"] = {name}')
             else:
@@ -181,7 +181,7 @@ def _build_tool_body(tool: ToolDefinition) -> str:
 # ── Auth detection ─────────────────────────────────────────────────────────
 
 
-def _detect_auth(schemes: list[AuthScheme]) -> tuple[str, str]:
+def _resolve_auth_scheme(schemes: list[AuthScheme]) -> tuple[str, str]:
     """Return (header_name, scheme_prefix) from auth schemes."""
     for s in schemes:
         if s.scheme_type == "http":
@@ -221,7 +221,7 @@ def generate(
     with log_stage("Code Generation"):
         name = server_name or re.sub(r"[^a-z0-9]+", "-", spec.title.lower()).strip("-")
         env_prefix = re.sub(r"[^A-Z0-9]+", "_", spec.title.upper()).strip("_")
-        auth_header, auth_scheme = _detect_auth(spec.auth_schemes)
+        auth_header, auth_scheme = _resolve_auth_scheme(spec.auth_schemes)
         logger.info("Server name: %s, env prefix: %s", name, env_prefix)
         logger.info("Auth: header=%s, scheme=%s", auth_header, auth_scheme or "(none)")
 
@@ -310,10 +310,10 @@ def generate(
         for t in tools:
             code_lines.append("")
             code_lines.append("")
-            sig = _build_signature(t)
+            sig = _render_signature(t)
             code_lines.append(f"@tool(description={t.description!r})")
             code_lines.append(f"async def {t.name}({sig}) -> str:")
-            body = _build_tool_body(t)
+            body = _render_tool_body(t)
             code_lines.append(body)
 
         # Server

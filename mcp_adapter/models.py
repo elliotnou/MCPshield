@@ -1,8 +1,8 @@
-"""Canonical data models used across the pipeline.
+"""Core domain models for the Anvil pipeline.
 
-Every ingestion source (OpenAPI, Postman, SDK, …) normalises into these
-models so that downstream stages (mining, safety, codegen) are
-source-agnostic.
+All ingestion sources (OpenAPI specs, Postman collections, SDK code, etc.)
+get normalized into these models. Downstream stages like mining, safety
+classification, and code generation all operate on these shared types.
 """
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-# ── HTTP / transport primitives ─────────────────────────────────────────────
-
+# ── HTTP verbs and param locations ──────────────────────────────────────────
 
 class HttpMethod(str, Enum):
+    """Standard HTTP methods supported by the pipeline."""
     GET = "GET"
     POST = "POST"
     PUT = "PUT"
@@ -27,6 +27,7 @@ class HttpMethod(str, Enum):
 
 
 class ParamLocation(str, Enum):
+    """Where a parameter lives in an HTTP request."""
     QUERY = "query"
     PATH = "path"
     HEADER = "header"
@@ -35,12 +36,17 @@ class ParamLocation(str, Enum):
     FORM_DATA = "formData"
 
 
-# ── Endpoint representation ────────────────────────────────────────────────
+class SafetyLevel(str, Enum):
+    """Risk tier assigned to each tool during safety classification."""
+    READ = "read"
+    WRITE = "write"
+    DESTRUCTIVE = "destructive"
 
+
+# ── Request / response schemas ──────────────────────────────────────────────
 
 class ParamSchema(BaseModel):
-    """A single parameter (query, path, header, or body field)."""
-
+    """Describes a single API parameter (query, path, header, or body field)."""
     name: str
     location: ParamLocation
     description: str = ""
@@ -52,17 +58,17 @@ class ParamSchema(BaseModel):
 
 
 class ResponseSchema(BaseModel):
-    """Simplified response descriptor."""
-
+    """Lightweight representation of an API response."""
     status_code: int
     description: str = ""
     content_type: str = "application/json"
     schema_fields: dict[str, Any] = Field(default_factory=dict)
 
 
-class Endpoint(BaseModel):
-    """One API endpoint extracted from a spec."""
+# ── Endpoint ────────────────────────────────────────────────────────────────
 
+class Endpoint(BaseModel):
+    """A single API endpoint parsed from a specification file."""
     method: HttpMethod
     path: str
     operation_id: str = ""
@@ -76,21 +82,10 @@ class Endpoint(BaseModel):
     deprecated: bool = False
 
 
-# ── Safety classification ──────────────────────────────────────────────────
-
-
-class SafetyLevel(str, Enum):
-    READ = "read"
-    WRITE = "write"
-    DESTRUCTIVE = "destructive"
-
-
-# ── Tool (the unit the MCP server exposes) ─────────────────────────────────
-
+# ── MCP tool definitions ───────────────────────────────────────────────────
 
 class ToolParam(BaseModel):
-    """One parameter in a generated MCP tool."""
-
+    """A parameter exposed by a generated MCP tool function."""
     name: str
     description: str = ""
     json_type: str = "string"
@@ -100,8 +95,7 @@ class ToolParam(BaseModel):
 
 
 class ToolDefinition(BaseModel):
-    """A high-level tool that may wrap one or more endpoints."""
-
+    """An MCP tool — may wrap one or more upstream API endpoints."""
     name: str
     description: str
     safety: SafetyLevel = SafetyLevel.READ
@@ -110,22 +104,22 @@ class ToolDefinition(BaseModel):
     tags: list[str] = Field(default_factory=list)
 
 
-# ── API spec metadata ──────────────────────────────────────────────────────
-
+# ── Top-level API metadata ─────────────────────────────────────────────────
 
 class AuthScheme(BaseModel):
-    """An authentication scheme declared by the spec."""
-
+    """Auth scheme declared by the upstream spec (apiKey, http, oauth2, …)."""
     name: str
-    scheme_type: str  # apiKey | http | oauth2 | openIdConnect
-    location: str = ""  # header | query | cookie (for apiKey)
+    scheme_type: str          # apiKey | http | oauth2 | openIdConnect
+    location: str = ""        # header | query | cookie (for apiKey)
     header_name: str = ""
     flows: dict[str, Any] = Field(default_factory=dict)
 
 
 class APISpec(BaseModel):
-    """The fully-parsed, source-agnostic representation of an API."""
+    """Fully-parsed, source-agnostic API representation.
 
+    Central data structure consumed by every downstream pipeline stage.
+    """
     title: str
     version: str = ""
     description: str = ""

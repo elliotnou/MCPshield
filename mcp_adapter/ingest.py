@@ -1,4 +1,4 @@
-"""Ingestion layer — parse various API spec formats into a canonical APISpec.
+"""API specification ingestion — normalize diverse formats into a unified APISpec.
 
 Supported sources:
   1. OpenAPI 3.x / Swagger 2.x  (YAML or JSON — local file or URL)
@@ -36,7 +36,7 @@ from .models import (
 # ── Helpers ─────────────────────────────────────────────────────────────────
 
 
-def _is_url(source: str) -> bool:
+def _looks_like_url(source: str) -> bool:
     """Check if source is a URL."""
     try:
         parsed = urlparse(str(source))
@@ -45,7 +45,7 @@ def _is_url(source: str) -> bool:
         return False
 
 
-def _fetch_url(url: str) -> dict[str, Any]:
+def _download_spec(url: str) -> dict[str, Any]:
     """Fetch an OpenAPI spec from a URL (JSON or YAML).
 
     If the URL points to a Swagger UI HTML page, auto-discover the actual
@@ -136,7 +136,7 @@ def _fetch_url(url: str) -> dict[str, Any]:
     )
 
 
-def _load_file(path: str | Path) -> dict[str, Any]:
+def _read_local(path: str | Path) -> dict[str, Any]:
     """Load a YAML or JSON file into a dict."""
     path = Path(path)
     text = path.read_text(encoding="utf-8")
@@ -145,7 +145,7 @@ def _load_file(path: str | Path) -> dict[str, Any]:
     return json.loads(text)
 
 
-def _resolve_ref(spec: dict, ref: str) -> dict:
+def _follow_ref(spec: dict, ref: str) -> dict:
     """Resolve a simple $ref like '#/components/schemas/Pet'."""
     parts = ref.lstrip("#/").split("/")
     node = spec
@@ -154,22 +154,22 @@ def _resolve_ref(spec: dict, ref: str) -> dict:
     return node
 
 
-def _flatten_schema(spec: dict, schema: dict) -> dict:
+def _expand_schema(spec: dict, schema: dict) -> dict:
     """Recursively resolve $ref in a schema dict."""
     if "$ref" in schema:
-        schema = _resolve_ref(spec, schema["$ref"])
+        schema = _follow_ref(spec, schema["$ref"])
     result = dict(schema)
     if "properties" in result:
         result["properties"] = {
-            k: _flatten_schema(spec, v)
+            k: _expand_schema(spec, v)
             for k, v in result["properties"].items()
         }
     if "items" in result:
-        result["items"] = _flatten_schema(spec, result["items"])
+        result["items"] = _expand_schema(spec, result["items"])
     if "allOf" in result:
         merged: dict[str, Any] = {}
         for sub in result["allOf"]:
-            sub = _flatten_schema(spec, sub)
+            sub = _expand_schema(spec, sub)
             merged.update(sub)
             if "properties" in sub:
                 merged.setdefault("properties", {}).update(sub["properties"])
@@ -186,10 +186,10 @@ def _parse_openapi_params(
     params: list[ParamSchema] = []
     for p in raw_params:
         if "$ref" in p:
-            p = _resolve_ref(spec, p["$ref"])
+            p = _follow_ref(spec, p["$ref"])
         schema = p.get("schema", {})
         if "$ref" in schema:
-            schema = _resolve_ref(spec, schema["$ref"])
+            schema = _follow_ref(spec, schema["$ref"])
         params.append(
             ParamSchema(
                 name=p.get("name", ""),
@@ -212,16 +212,16 @@ def _parse_openapi_request_body(
     if not body:
         return {}, []
     if "$ref" in body:
-        body = _resolve_ref(spec, body["$ref"])
+        body = _follow_ref(spec, body["$ref"])
     content = body.get("content", {})
     json_content = content.get("application/json", {})
     schema = json_content.get("schema", {})
-    schema = _flatten_schema(spec, schema)
+    schema = _expand_schema(spec, schema)
 
     params: list[ParamSchema] = []
     required_fields = set(schema.get("required", []))
     for name, prop in schema.get("properties", {}).items():
-        prop = _flatten_schema(spec, prop)
+        prop = _expand_schema(spec, prop)
         params.append(
             ParamSchema(
                 name=name,
@@ -243,13 +243,13 @@ def _parse_openapi_responses(
     responses: list[ResponseSchema] = []
     for code, resp in raw.items():
         if "$ref" in resp:
-            resp = _resolve_ref(spec, resp["$ref"])
+            resp = _follow_ref(spec, resp["$ref"])
         content = resp.get("content", {})
         schema: dict[str, Any] = {}
         ct = "application/json"
         if content:
             ct = next(iter(content))
-            schema = _flatten_schema(
+            schema = _expand_schema(
                 spec, content[ct].get("schema", {})
             )
         try:
@@ -267,7 +267,7 @@ def _parse_openapi_responses(
     return responses
 
 
-def _extract_auth_schemes(spec: dict) -> list[AuthScheme]:
+def _parse_auth(spec: dict) -> list[AuthScheme]:
     """Pull auth from components/securitySchemes (OAS3) or securityDefinitions (Swagger2)."""
     schemes: list[AuthScheme] = []
     defs = (
@@ -295,7 +295,7 @@ def parse_openapi(source: str | Path, raw_data: dict | None = None) -> APISpec:
         raw_data: Pre-loaded spec dict (skips file/URL loading).
     """
     logger = get_logger()
-    raw = raw_data if raw_data is not None else _load_file(source)
+    raw = raw_data if raw_data is not None else _read_local(source)
     info = raw.get("info", {})
     logger.debug("Parsing OpenAPI spec: %s v%s", info.get("title"), info.get("version"))
 
@@ -309,7 +309,7 @@ def parse_openapi(source: str | Path, raw_data: dict | None = None) -> APISpec:
         base_url = f"{scheme}://{raw['host']}{raw.get('basePath', '')}"
 
     # Auth
-    auth_schemes = _extract_auth_schemes(raw)
+    auth_schemes = _parse_auth(raw)
     global_security = raw.get("security", [])
     global_auth_names = [
         name for sec in global_security for name in sec.keys()
@@ -455,7 +455,7 @@ def _postman_params(item: dict) -> list[ParamSchema]:
     return params
 
 
-def _walk_postman_items(
+def _traverse_postman(
     items: list[dict], tag_prefix: str = ""
 ) -> list[Endpoint]:
     """Recursively walk Postman item tree (folders = tags)."""
@@ -465,7 +465,7 @@ def _walk_postman_items(
             # It's a folder
             folder_name = item.get("name", "")
             endpoints.extend(
-                _walk_postman_items(item["item"], folder_name)
+                _traverse_postman(item["item"], folder_name)
             )
         else:
             base, path = _postman_url(item)
@@ -490,9 +490,9 @@ def _walk_postman_items(
 
 def parse_postman(path: str | Path) -> APISpec:
     """Parse a Postman Collection v2.1 JSON file."""
-    raw = _load_file(path)
+    raw = _read_local(path)
     info = raw.get("info", {})
-    endpoints = _walk_postman_items(raw.get("item", []))
+    endpoints = _traverse_postman(raw.get("item", []))
 
     # Try to extract base URL from first endpoint
     base_url = ""
@@ -527,9 +527,9 @@ def ingest(source: str | Path) -> APISpec:
         source_str = str(source)
 
         # URL-based fetching
-        if _is_url(source_str):
+        if _looks_like_url(source_str):
             logger.info("Source is a URL: %s", source_str)
-            data = _fetch_url(source_str)
+            data = _download_spec(source_str)
             if "openapi" in data or "swagger" in data:
                 return parse_openapi(source_str, raw_data=data)
             logger.warning("URL content doesn't look like OpenAPI, trying anyway")
@@ -537,7 +537,7 @@ def ingest(source: str | Path) -> APISpec:
 
         # Local file
         logger.info("Source is a local file: %s", source_str)
-        data = _load_file(source)
+        data = _read_local(source)
         if "openapi" in data or "swagger" in data:
             return parse_openapi(source)
         if "info" in data and "_postman_id" in data.get("info", {}):

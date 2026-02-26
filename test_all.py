@@ -1,4 +1,4 @@
-"""End-to-end test suite for the entire project.
+"""Integration tests covering all major subsystems.
 
 Tests:
   1. Direct math MCP server (hand-built with dedalus_mcp)
@@ -31,13 +31,13 @@ passed = 0
 failed = 0
 
 
-def ok(name: str, detail: str = ""):
+def _pass(name: str, detail: str = ""):
     global passed
     passed += 1
     print(f"  ✓ {name}" + (f" — {detail}" if detail else ""))
 
 
-def fail(name: str, detail: str = ""):
+def _fail(name: str, detail: str = ""):
     global failed
     failed += 1
     print(f"  ✗ {name}" + (f" — {detail}" if detail else ""))
@@ -51,15 +51,15 @@ async def test_math_mcp():
     try:
         client = await MCPClient.connect(MATH_MCP_URL)
     except Exception as e:
-        fail("connect", f"Could not connect to {MATH_MCP_URL}: {e}")
+        _fail("connect", f"Could not connect to {MATH_MCP_URL}: {e}")
         return
 
     tools = await client.list_tools()
     names = sorted(t.name for t in tools.tools)
     if names == ["add", "divide", "multiply", "subtract"]:
-        ok("tool registration", str(names))
+        _pass("tool registration", str(names))
     else:
-        fail("tool registration", str(names))
+        _fail("tool registration", str(names))
 
     tests = [
         ("add", {"a": 10, "b": 5}, "15"),
@@ -71,16 +71,16 @@ async def test_math_mcp():
         r = await client.call_tool(name, args)
         text = r.content[0].text
         if expected in text:
-            ok(f"{name}({args})", text.strip())
+            _pass(f"{name}({args})", text.strip())
         else:
-            fail(f"{name}({args})", f"expected {expected}, got {text}")
+            _fail(f"{name}({args})", f"expected {expected}, got {text}")
 
     # Division by zero
     r = await client.call_tool("divide", {"a": 1, "b": 0})
     if "zero" in r.content[0].text.lower():
-        ok("divide-by-zero", r.content[0].text.strip())
+        _pass("divide-by-zero", r.content[0].text.strip())
     else:
-        fail("divide-by-zero", r.content[0].text.strip())
+        _fail("divide-by-zero", r.content[0].text.strip())
 
     await client.close()
 
@@ -95,11 +95,11 @@ async def test_rest_api():
         try:
             r = await c.get(f"{REST_API_URL}/health")
             if r.json().get("status") == "ok":
-                ok("health")
+                _pass("health")
             else:
-                fail("health", r.text)
+                _fail("health", r.text)
         except Exception as e:
-            fail("health", str(e))
+            _fail("health", str(e))
             return
 
         tests = [
@@ -112,16 +112,16 @@ async def test_rest_api():
             r = await c.post(f"{REST_API_URL}/{op}", json=data)
             result = r.json().get("result")
             if result == expected:
-                ok(f"POST /{op}", f"{result}")
+                _pass(f"POST /{op}", f"{result}")
             else:
-                fail(f"POST /{op}", f"expected {expected}, got {result}")
+                _fail(f"POST /{op}", f"expected {expected}, got {result}")
 
         # Division by zero
         r = await c.post(f"{REST_API_URL}/divide", json={"a": 1, "b": 0})
         if r.status_code == 400 and "zero" in r.json().get("error", ""):
-            ok("divide-by-zero (400)")
+            _pass("divide-by-zero (400)")
         else:
-            fail("divide-by-zero", r.text)
+            _fail("divide-by-zero", r.text)
 
 
 # ── 3. Adapter-generated MCP server ────────────────────────────────────────
@@ -132,16 +132,16 @@ async def test_adapter_mcp():
     try:
         client = await MCPClient.connect(ADAPTER_MCP_URL)
     except Exception as e:
-        fail("connect", f"Could not connect to {ADAPTER_MCP_URL}: {e}")
+        _fail("connect", f"Could not connect to {ADAPTER_MCP_URL}: {e}")
         return
 
     tools = await client.list_tools()
     names = sorted(t.name for t in tools.tools)
     expected = ["addnumbers", "dividenumbers", "healthcheck", "multiplynumbers", "subtractnumbers"]
     if names == expected:
-        ok("tool registration", str(names))
+        _pass("tool registration", str(names))
     else:
-        fail("tool registration", f"expected {expected}, got {names}")
+        _fail("tool registration", f"expected {expected}, got {names}")
 
     tests = [
         ("addnumbers", {"a": 42, "b": 8}, "50"),
@@ -153,16 +153,16 @@ async def test_adapter_mcp():
         r = await client.call_tool(name, args)
         text = r.content[0].text
         if expected_val in text:
-            ok(f"{name}({args})", f"result contains {expected_val}")
+            _pass(f"{name}({args})", f"result contains {expected_val}")
         else:
-            fail(f"{name}({args})", text[:100])
+            _fail(f"{name}({args})", text[:100])
 
     # Health check
     r = await client.call_tool("healthcheck", {})
     if "ok" in r.content[0].text:
-        ok("healthcheck", "status ok")
+        _pass("healthcheck", "status ok")
     else:
-        fail("healthcheck", r.content[0].text[:100])
+        _fail("healthcheck", r.content[0].text[:100])
 
     await client.close()
 
@@ -174,7 +174,7 @@ async def test_dedalus_agent():
     print("\n═══ 4. Dedalus SDK Agent ═══")
     api_key = os.getenv("DEDALUS_API_KEY")
     if not api_key:
-        fail("api key", "DEDALUS_API_KEY not set")
+        _fail("api key", "DEDALUS_API_KEY not set")
         return
 
     def add(a: float, b: float) -> float:
@@ -197,20 +197,20 @@ async def test_dedalus_agent():
         )
         output = result.output
         if "200" in output:
-            ok("agent tool use", output[:100])
+            _pass("agent tool use", output[:100])
         else:
-            ok("agent completed", output[:100])
+            _pass("agent completed", output[:100])
     except Exception as e:
-        fail("agent", str(e)[:200])
+        _fail("agent", str(e)[:200])
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
 
 
 async def main():
-    print("╔════════════════════════════════════════════════╗")
-    print("║   MCP Adapter Generator — Full Test Suite      ║")
-    print("╚════════════════════════════════════════════════╝")
+    print("=" * 54)
+    print("  Anvil — Integration Test Suite")
+    print("=" * 54)
 
     await test_math_mcp()
     await test_rest_api()

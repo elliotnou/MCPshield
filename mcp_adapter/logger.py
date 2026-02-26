@@ -16,37 +16,33 @@ from typing import Generator
 
 
 class _ColourFormatter(logging.Formatter):
-    """ANSI-coloured log formatter for terminal output."""
+    """Terminal-aware formatter that adds ANSI colours and stage context."""
 
-    GREY = "\033[90m"
-    BLUE = "\033[94m"
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BOLD = "\033[1m"
-    RESET = "\033[0m"
+    _GREY = "\033[90m"
+    _BLUE = "\033[94m"
+    _CYAN = "\033[96m"
+    _GREEN = "\033[92m"
+    _YELLOW = "\033[93m"
+    _RED = "\033[91m"
+    _BOLD = "\033[1m"
+    _RST = "\033[0m"
 
     LEVEL_COLOURS = {
-        logging.DEBUG: GREY,
-        logging.INFO: CYAN,
-        logging.WARNING: YELLOW,
-        logging.ERROR: RED,
-        logging.CRITICAL: RED + BOLD,
+        logging.DEBUG: _GREY,
+        logging.INFO: _CYAN,
+        logging.WARNING: _YELLOW,
+        logging.ERROR: _RED,
+        logging.CRITICAL: _RED + _BOLD,
     }
 
     def format(self, record: logging.LogRecord) -> str:
-        colour = self.LEVEL_COLOURS.get(record.levelno, self.RESET)
-        ts = time.strftime("%H:%M:%S", time.localtime(record.created))
-        ms = f"{record.created % 1:.3f}"[1:]
-        prefix = f"{self.GREY}{ts}{ms}{self.RESET}"
-        stage = getattr(record, "stage", "")
-        if stage:
-            stage_str = f" {self.BOLD}[{stage}]{self.RESET}"
-        else:
-            stage_str = ""
-        msg = f"{prefix}{stage_str} {colour}{record.getMessage()}{self.RESET}"
-        return msg
+        colour = self.LEVEL_COLOURS.get(record.levelno, self._RST)
+        timestamp = time.strftime("%H:%M:%S", time.localtime(record.created))
+        millis = f"{record.created % 1:.3f}"[1:]
+        header = f"{self._GREY}{timestamp}{millis}{self._RST}"
+        stage = getattr(record, "stage", None)
+        stage_tag = f" {self._BOLD}[{stage}]{self._RST}" if stage else ""
+        return f"{header}{stage_tag} {colour}{record.getMessage()}{self._RST}"
 
 
 # ── Module-level logger ───────────────────────────────────────────────────
@@ -83,19 +79,14 @@ def log_stage(stage_name: str) -> Generator[logging.Logger, None, None]:
     """Context manager that logs stage entry/exit with timing."""
     logger = get_logger()
     start = time.perf_counter()
-    logger.info("━━ %s started", stage_name, extra={"stage": stage_name})
+    extra = {"stage": stage_name}
+    logger.info("▸ %s …", stage_name, extra=extra)
     try:
         yield logger
     except Exception:
-        elapsed = time.perf_counter() - start
-        logger.error(
-            "━━ %s FAILED (%.2fs)", stage_name, elapsed,
-            extra={"stage": stage_name},
-        )
+        dt = time.perf_counter() - start
+        logger.error("✗ %s FAILED (%.2fs)", stage_name, dt, extra=extra)
         raise
     else:
-        elapsed = time.perf_counter() - start
-        logger.info(
-            "━━ %s completed (%.2fs)", stage_name, elapsed,
-            extra={"stage": stage_name},
-        )
+        dt = time.perf_counter() - start
+        logger.info("✓ %s done (%.2fs)", stage_name, dt, extra=extra)

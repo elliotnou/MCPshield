@@ -1,11 +1,11 @@
-"""Capability mining — turn raw endpoints into high-level MCP tool definitions.
+"""Capability mining — convert raw API endpoints into high-level MCP tools.
 
-Strategy:
-  1. Group endpoints by tag (or path prefix if no tags).
-  2. Within each group, cluster by "job-to-be-done" heuristics.
-  3. Prefer high-level tools over 1:1 endpoint wrappers when possible
-     (e.g. one ``search_issues`` tool instead of 12 filter endpoints).
-  4. Generate clean, model-friendly names and descriptions.
+Approach:
+  1. Bucket endpoints by tag (falling back to path prefix).
+  2. Inside each bucket, cluster GET-only groups into a single search tool
+     when the heuristic fires.
+  3. Write/delete endpoints always get their own dedicated tool.
+  4. Produce clean snake_case names and human-friendly descriptions.
 """
 
 from __future__ import annotations
@@ -25,10 +25,9 @@ from .models import (
 )
 
 
-# ── Naming helpers ──────────────────────────────────────────────────────────
+# ── Naming utilities ────────────────────────────────────────────────────────
 
-
-_CRUD_MAP: dict[HttpMethod, str] = {
+_VERB_MAP: dict[HttpMethod, str] = {
     HttpMethod.GET: "get",
     HttpMethod.POST: "create",
     HttpMethod.PUT: "update",
@@ -38,218 +37,177 @@ _CRUD_MAP: dict[HttpMethod, str] = {
     HttpMethod.OPTIONS: "options",
 }
 
-_PATH_ID_RE = re.compile(r"\{[^}]+\}")
+_PARAM_PLACEHOLDER = re.compile(r"\{[^}]+\}")
 
 
-def _slugify(text: str) -> str:
-    """Turn arbitrary text into a snake_case identifier."""
-    text = text.strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "_", text)
-    return text.strip("_")
+def _to_snake(text: str) -> str:
+    """Convert arbitrary text to a valid snake_case identifier."""
+    return re.sub(r"[^a-z0-9]+", "_", text.strip().lower()).strip("_")
 
 
-def _resource_from_path(path: str) -> str:
-    """Extract the main resource name from a URL path.
+def _resource_name(path: str) -> str:
+    """Extract the primary resource from a URL path.
 
     /pets/{petId}/toys  →  pet_toys
     /api/v1/issues      →  issues
     """
-    segments = [
-        s for s in path.split("/") if s and not _PATH_ID_RE.fullmatch(s)
-    ]
-    # Drop version-like segments
-    segments = [s for s in segments if not re.fullmatch(r"v\d+", s)]
-    if not segments:
+    parts = [s for s in path.split("/") if s and not _PARAM_PLACEHOLDER.fullmatch(s)]
+    # skip version-like segments (v1, v2, ...)
+    parts = [s for s in parts if not re.fullmatch(r"v\d+", s)]
+    if not parts:
         return "root"
-    # Keep last 2 meaningful segments max
-    keep = segments[-2:] if len(segments) >= 2 else segments
-    return "_".join(_slugify(s) for s in keep)
+    tail = parts[-2:] if len(parts) >= 2 else parts
+    return "_".join(_to_snake(seg) for seg in tail)
 
 
-def _tool_name_from_endpoint(ep: Endpoint) -> str:
-    """Derive a short tool name from an endpoint."""
+def _derive_tool_name(ep: Endpoint) -> str:
+    """Build a concise tool name from an endpoint."""
     if ep.operation_id:
-        return _slugify(ep.operation_id)
-    verb = _CRUD_MAP.get(ep.method, ep.method.value.lower())
-    resource = _resource_from_path(ep.path)
-    # Avoid "get_pets" for a list endpoint; prefer "list_pets"
-    if verb == "get" and not _PATH_ID_RE.search(ep.path):
+        return _to_snake(ep.operation_id)
+    verb = _VERB_MAP.get(ep.method, ep.method.value.lower())
+    resource = _resource_name(ep.path)
+    # "list_X" reads better than "get_X" for collection endpoints
+    if verb == "get" and not _PARAM_PLACEHOLDER.search(ep.path):
         verb = "list"
     return f"{verb}_{resource}"
 
 
-def _tool_description(ep: Endpoint) -> str:
-    """Build a human-readable description."""
-    if ep.summary:
-        desc = ep.summary
-    elif ep.description:
-        desc = ep.description.split("\n")[0][:200]
-    else:
-        desc = f"{ep.method.value} {ep.path}"
-    # Append deprecation warning
+def _build_description(ep: Endpoint) -> str:
+    """Human-readable one-liner for the tool."""
+    text = ep.summary or (ep.description.split("\n")[0][:200] if ep.description else "")
+    if not text:
+        text = f"{ep.method.value} {ep.path}"
     if ep.deprecated:
-        desc += " [DEPRECATED]"
-    return desc
+        text += " [DEPRECATED]"
+    return text
 
 
-# ── Parameter conversion ───────────────────────────────────────────────────
+# ── Param conversion ───────────────────────────────────────────────────────
 
-
-_TYPE_MAP = {
-    "integer": "integer",
-    "int": "integer",
-    "number": "number",
-    "float": "number",
-    "boolean": "boolean",
-    "bool": "boolean",
-    "array": "array",
-    "object": "object",
+_JSON_TYPE_ALIAS = {
+    "integer": "integer", "int": "integer",
+    "number": "number", "float": "number",
+    "boolean": "boolean", "bool": "boolean",
+    "array": "array", "object": "object",
 }
 
 
-def _convert_params(ep: Endpoint) -> list[ToolParam]:
-    """Convert endpoint parameters into MCP tool params."""
+def _endpoint_params_to_tool_params(ep: Endpoint) -> list[ToolParam]:
+    """Translate endpoint params into MCP tool params, deduplicating."""
     seen: set[str] = set()
-    params: list[ToolParam] = []
+    out: list[ToolParam] = []
     for p in ep.parameters:
         if p.name in seen:
             continue
         seen.add(p.name)
-        params.append(
-            ToolParam(
-                name=p.name,
-                description=p.description or f"{p.location.value} parameter",
-                json_type=_TYPE_MAP.get(p.schema_type, "string"),
-                required=p.required,
-                enum=p.enum,
-                default=p.default,
-            )
-        )
-    return params
+        out.append(ToolParam(
+            name=p.name,
+            description=p.description or f"{p.location.value} parameter",
+            json_type=_JSON_TYPE_ALIAS.get(p.schema_type, "string"),
+            required=p.required,
+            enum=p.enum,
+            default=p.default,
+        ))
+    return out
 
 
 # ── Safety heuristic ───────────────────────────────────────────────────────
 
-
-def _infer_safety(ep: Endpoint) -> SafetyLevel:
-    """Quick safety classification based on HTTP method."""
+def _quick_safety(ep: Endpoint) -> SafetyLevel:
+    """Fast safety guess based solely on the HTTP method."""
     if ep.method == HttpMethod.DELETE:
         return SafetyLevel.DESTRUCTIVE
-    if ep.method in (HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH):
+    if ep.method in {HttpMethod.POST, HttpMethod.PUT, HttpMethod.PATCH}:
         return SafetyLevel.WRITE
     return SafetyLevel.READ
 
 
-# ── Grouping / clustering ─────────────────────────────────────────────────
+# ── Grouping logic ─────────────────────────────────────────────────────────
+
+def _bucket_key(ep: Endpoint) -> str:
+    """Decide which bucket an endpoint belongs to."""
+    return _to_snake(ep.tags[0]) if ep.tags else _resource_name(ep.path)
 
 
-def _group_key(ep: Endpoint) -> str:
-    """Group key: first tag or path-based resource."""
-    if ep.tags:
-        return _slugify(ep.tags[0])
-    return _resource_from_path(ep.path)
-
-
-def _should_merge(eps: list[Endpoint]) -> bool:
-    """Heuristic: merge GET endpoints that share the same resource
-    and only differ by filtering params into a single search tool.
-    """
-    if len(eps) < 3:
+def _is_mergeable(endpoints: list[Endpoint]) -> bool:
+    """Decide whether a group of GET endpoints should collapse into one tool."""
+    if len(endpoints) < 3:
         return False
-    methods = {e.method for e in eps}
-    return methods == {HttpMethod.GET}
+    return all(e.method == HttpMethod.GET for e in endpoints)
 
 
-def _merge_search_tool(
-    group_name: str, eps: list[Endpoint]
-) -> ToolDefinition:
-    """Merge multiple GET endpoints into a single search/list tool."""
-    all_params: dict[str, ToolParam] = {}
-    for ep in eps:
-        for p in _convert_params(ep):
-            if p.name not in all_params:
-                all_params[p.name] = p
+def _build_merged_tool(group: str, endpoints: list[Endpoint]) -> ToolDefinition:
+    """Collapse several GET endpoints into a single search/list tool."""
+    combined_params: dict[str, ToolParam] = {}
+    for ep in endpoints:
+        for tp in _endpoint_params_to_tool_params(ep):
+            combined_params.setdefault(tp.name, tp)
     return ToolDefinition(
-        name=f"search_{group_name}",
-        description=f"Search or list {group_name.replace('_', ' ')} with flexible filtering.",
+        name=f"search_{group}",
+        description=f"Search or list {group.replace('_', ' ')} with flexible filtering.",
         safety=SafetyLevel.READ,
-        params=list(all_params.values()),
-        endpoints=eps,
-        tags=[group_name],
+        params=list(combined_params.values()),
+        endpoints=endpoints,
+        tags=[group],
     )
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
 
-
 def mine_tools(spec: APISpec) -> list[ToolDefinition]:
-    """Convert an APISpec into a list of ToolDefinitions.
-
-    This is the main entry-point for capability mining.
-    """
+    """Main entry point: convert an APISpec into a list of ToolDefinitions."""
     with log_stage("Capability Mining") as logger:
-        # Group endpoints
-        groups: dict[str, list[Endpoint]] = defaultdict(list)
+        buckets: dict[str, list[Endpoint]] = defaultdict(list)
         for ep in spec.endpoints:
-            groups[_group_key(ep)].append(ep)
+            buckets[_bucket_key(ep)].append(ep)
 
         logger.info(
             "Grouped %d endpoints into %d resource groups: %s",
-            len(spec.endpoints), len(groups), list(groups.keys()),
+            len(spec.endpoints), len(buckets), list(buckets.keys()),
         )
 
         tools: list[ToolDefinition] = []
-        seen_names: set[str] = set()
+        used_names: set[str] = set()
 
-        for group_name, eps in groups.items():
-            # Try merging read-heavy groups
-            read_eps = [e for e in eps if e.method == HttpMethod.GET]
-            write_eps = [e for e in eps if e.method != HttpMethod.GET]
+        def _register(td: ToolDefinition) -> None:
+            """Add a tool, deduplicating by name."""
+            name = td.name
+            if name in used_names:
+                suffix = _to_snake(td.endpoints[0].path.split("/")[-1]) if td.endpoints else "alt"
+                name = f"{name}_{suffix}"
+            if name not in used_names:
+                td.name = name
+                tools.append(td)
+                used_names.add(name)
 
-            if _should_merge(read_eps):
-                merged = _merge_search_tool(group_name, read_eps)
-                if merged.name not in seen_names:
-                    tools.append(merged)
-                    seen_names.add(merged.name)
+        for group_name, eps in buckets.items():
+            reads = [e for e in eps if e.method == HttpMethod.GET]
+            writes = [e for e in eps if e.method != HttpMethod.GET]
+
+            # Try collapsing read-heavy groups
+            if _is_mergeable(reads):
+                _register(_build_merged_tool(group_name, reads))
             else:
-                for ep in read_eps:
-                    name = _tool_name_from_endpoint(ep)
-                    # Deduplicate
-                    if name in seen_names:
-                        name = f"{name}_{_slugify(ep.path.split('/')[-1])}"
-                    if name not in seen_names:
-                        tools.append(
-                            ToolDefinition(
-                                name=name,
-                                description=_tool_description(ep),
-                                safety=_infer_safety(ep),
-                                params=_convert_params(ep),
-                                endpoints=[ep],
-                                tags=ep.tags or [group_name],
-                            )
-                        )
-                        seen_names.add(name)
+                for ep in reads:
+                    _register(ToolDefinition(
+                        name=_derive_tool_name(ep),
+                        description=_build_description(ep),
+                        safety=_quick_safety(ep),
+                        params=_endpoint_params_to_tool_params(ep),
+                        endpoints=[ep],
+                        tags=ep.tags or [group_name],
+                    ))
 
-            # Write endpoints always get their own tool
-            for ep in write_eps:
-                name = _tool_name_from_endpoint(ep)
-                if name in seen_names:
-                    name = f"{name}_{_slugify(ep.path.split('/')[-1])}"
-                if name not in seen_names:
-                    tools.append(
-                        ToolDefinition(
-                            name=name,
-                            description=_tool_description(ep),
-                            safety=_infer_safety(ep),
-                            params=_convert_params(ep),
-                            endpoints=[ep],
-                            tags=ep.tags or [group_name],
-                        )
-                    )
-                    seen_names.add(name)
+            # Every write/delete endpoint gets its own tool
+            for ep in writes:
+                _register(ToolDefinition(
+                    name=_derive_tool_name(ep),
+                    description=_build_description(ep),
+                    safety=_quick_safety(ep),
+                    params=_endpoint_params_to_tool_params(ep),
+                    endpoints=[ep],
+                    tags=ep.tags or [group_name],
+                ))
 
-        logger.info(
-            "Extracted %d tools: %s",
-            len(tools), [t.name for t in tools],
-        )
+        logger.info("Extracted %d tools: %s", len(tools), [t.name for t in tools])
         return sorted(tools, key=lambda t: t.name)

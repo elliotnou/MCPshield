@@ -1,23 +1,23 @@
-"""AI reasoning module for intelligent schema enhancement.
+"""AI-powered reasoning for intelligent tool enhancement.
 
-Supports multiple reasoning providers (configured via env vars):
+Manages multiple LLM providers (K2, Dedalus, etc.) and uses them to:
+  1. Improve auto-generated tool names and descriptions.
+  2. Fill in missing parameter descriptions.
+  3. Suggest tool merges for related endpoints.
+  4. Validate safety classifications with semantic understanding.
 
-  Provider 1 — K2 (MBZUAI IFM) or any OpenAI-compatible endpoint:
+Provider configuration via environment variables:
+
+  K2 (MBZUAI IFM) or any OpenAI-compatible endpoint:
     K2_API_KEY   = your key
     K2_BASE_URL  = https://your-endpoint/v1   (optional, auto-detected)
     K2_MODEL     = model-name                 (optional, default: auto)
 
-  Provider 2 — Dedalus API (fallback):
+  Dedalus API (fallback):
     DEDALUS_API_KEY = your key
     Uses openai/gpt-4o-mini via Dedalus gateway.
 
-The module will try K2 first, then fall back to Dedalus if K2 fails.
-
-Capabilities:
-  1. Generate better tool names and descriptions from raw endpoint data.
-  2. Infer missing parameter descriptions.
-  3. Suggest which endpoints should be merged into a single tool.
-  4. Classify safety levels with semantic understanding.
+The module tries K2 first, then falls back to Dedalus.
 """
 
 from __future__ import annotations
@@ -53,7 +53,7 @@ _PROVIDERS = [
 ]
 
 
-def _available_providers() -> list[dict[str, str]]:
+def _get_configured_providers() -> list[dict[str, str]]:
     """Return all providers that have an API key configured."""
     result = []
     for prov in _PROVIDERS:
@@ -71,7 +71,7 @@ def _available_providers() -> list[dict[str, str]]:
 def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> str:
     """Call the best available reasoning LLM, with fallback across providers."""
     logger = get_logger()
-    providers = _available_providers()
+    providers = _get_configured_providers()
     if not providers:
         raise ValueError(
             "No reasoning API key found. Set K2_API_KEY or DEDALUS_API_KEY in .env"
@@ -115,7 +115,7 @@ def _call_llm(system_prompt: str, user_prompt: str, max_tokens: int = 2048) -> s
     raise RuntimeError(f"All reasoning providers failed. Last error: {last_error}")
 
 
-def _extract_json_from_response(text: str) -> Any:
+def _parse_json_response(text: str) -> Any:
     """Extract JSON from K2 response (handles markdown code fences)."""
     text = text.strip()
     if text.startswith("```"):
@@ -133,7 +133,7 @@ def enhance_tools_with_k2(
     spec: APISpec,
     tools: list[ToolDefinition],
 ) -> list[ToolDefinition]:
-    """Use K2 to enhance tool definitions with better names, descriptions,
+    """Enhance tool definitions using AI reasoning (better names, descriptions,
     and parameter metadata.
 
     Returns a new list of enhanced ToolDefinitions.
@@ -144,7 +144,7 @@ def enhance_tools_with_k2(
             len(tools), spec.title,
         )
 
-        # Build a concise representation for K2
+        # Prepare a lightweight summary for the reasoning LLM
         tools_summary = []
         for t in tools:
             tools_summary.append({
@@ -189,7 +189,7 @@ def enhance_tools_with_k2(
 
         try:
             raw_response = _call_llm(system_prompt, user_prompt, max_tokens=4096)
-            enhanced = _extract_json_from_response(raw_response)
+            enhanced = _parse_json_response(raw_response)
             if not isinstance(enhanced, list) or len(enhanced) != len(tools):
                 logger.warning(
                     "AI returned %d items (expected %d), falling back to originals",
@@ -198,7 +198,7 @@ def enhance_tools_with_k2(
                 )
                 return tools
 
-            # Apply enhancements
+            # Merge AI suggestions back into tool definitions
             for tool, enh in zip(tools, enhanced):
                 if isinstance(enh, dict):
                     if enh.get("name"):

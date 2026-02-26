@@ -1,19 +1,9 @@
-"""Discover - Capability Mining for MCP Exposure.
+"""Automated tool discovery with intelligent classification.
 
-Classifies ingested tool definitions to determine which endpoints
-can be safely exposed via MCP.
-
-Usage:
-    # Classify tools from an ingested JSON file
-    python discover.py --input digitalocean_tools.json --output digitalocean_classified.json
-    
-    # Use strict policy (only GET endpoints)
-    python discover.py --input tools.json --policy conservative
-    
-    # Use Featherless for edge case reasoning
-    python discover.py --input tools.json --use-reasoning
+Combines Gemini-based analysis with rule-based heuristics to decide which
+API endpoints should be exposed as MCP tools. Supports an interactive
+confirmation step where the user can accept/reject suggestions.
 """
-
 from __future__ import annotations
 
 import argparse
@@ -285,7 +275,7 @@ Classify each tool based on its name, method, path, and description."""
 # ── Featherless Reasoning ─────────────────────────────────────────────────────
 
 
-def enhance_with_reasoning(
+def _reasoning_edge_cases(
     tools: list[dict],
     classifications: list[dict],
     model: str = "deepseek-ai/DeepSeek-R1"
@@ -395,7 +385,7 @@ def classify_tools(
             classifications.append(result)
 
     if use_reasoning:
-        classifications = enhance_with_reasoning(tools, classifications)
+        classifications = _reasoning_edge_cases(tools, classifications)
 
     exposable = sum(1 for c in classifications if c.get("expose") is True)
     blocked = sum(1 for c in classifications if c.get("expose") is False)
@@ -449,7 +439,7 @@ def classify(
     
     # Enhance edge cases with reasoning
     if use_reasoning:
-        classifications = enhance_with_reasoning(tools, classifications)
+        classifications = _reasoning_edge_cases(tools, classifications)
     
     # Build output
     exposable = sum(1 for c in classifications if c.get("expose") == True)

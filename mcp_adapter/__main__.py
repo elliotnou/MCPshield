@@ -1,5 +1,8 @@
-"""Allow running as: python -m mcp_adapter ..."""
+"""Entry-point shim so `python -m mcp_adapter` works."""
+
+import sys
 
 from .cli import main
 
-main()
+if __name__ == "__main__":
+    sys.exit(main() or 0)

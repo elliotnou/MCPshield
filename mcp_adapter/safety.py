@@ -1,8 +1,9 @@
-"""Safety & permission shaping.
+"""Safety classification and policy enforcement.
 
-Classifies tools, applies policies, and annotates descriptions with
-side-effect warnings so that MCP clients (and the human-in-the-loop)
-can make informed decisions.
+Assigns risk levels to tools, applies allowlist/denylist policies,
+annotates descriptions with side-effect warnings, and redacts
+sensitive parameter names so MCP clients can enforce human-in-the-loop
+where appropriate.
 """
 
 from __future__ import annotations
@@ -14,68 +15,61 @@ from .logger import get_logger, log_stage
 from .models import SafetyLevel, ToolDefinition
 
 
-# ── Policy configuration ───────────────────────────────────────────────────
+# ── Configurable policy ────────────────────────────────────────────────────
+
+_DEFAULT_REDACT_PATTERNS = [
+    r"(?i)password",
+    r"(?i)secret",
+    r"(?i)token",
+    r"(?i)ssn",
+    r"(?i)credit.?card",
+]
 
 
 @dataclass
 class SafetyPolicy:
-    """Configurable policy for what the generated MCP server may expose."""
+    """Controls what the generated MCP server is allowed to expose."""
 
-    # Explicit allowlist of tool names.  Empty = allow all.
     allowlist: list[str] = field(default_factory=list)
-    # Explicit denylist of tool names.  Checked after allowlist.
     denylist: list[str] = field(default_factory=list)
-    # Block all destructive tools?
     block_destructive: bool = False
-    # Require confirmation annotation on write tools?
     require_write_confirmation: bool = True
-    # Regex patterns for PII / secret fields to redact from schemas
-    redact_patterns: list[str] = field(
-        default_factory=lambda: [
-            r"(?i)password",
-            r"(?i)secret",
-            r"(?i)token",
-            r"(?i)ssn",
-            r"(?i)credit.?card",
-        ]
-    )
-    # Max tools to expose (0 = no limit)
-    max_tools: int = 0
+    redact_patterns: list[str] = field(default_factory=lambda: list(_DEFAULT_REDACT_PATTERNS))
+    max_tools: int = 0       # 0 = unlimited
 
 
-# ── Keyword-based safety re-classification ─────────────────────────────────
+# ── Keyword-based reclassification ─────────────────────────────────────────
 
-_DESTRUCTIVE_KEYWORDS = re.compile(
-    r"(?i)(delete|remove|destroy|purge|drop|revoke|terminate|cancel)",
+_RE_DESTRUCTIVE = re.compile(
+    r"(?i)\b(delete|remove|destroy|purge|drop|revoke|terminate|cancel)\b",
 )
-_WRITE_KEYWORDS = re.compile(
-    r"(?i)(create|update|set|add|assign|upload|import|modify|enable|disable|patch|put)",
+_RE_WRITE = re.compile(
+    r"(?i)\b(create|update|set|add|assign|upload|import|modify|enable|disable|patch|put)\b",
 )
 
 
 def reclassify_safety(tool: ToolDefinition) -> SafetyLevel:
-    """Refine safety based on name + description keywords (beyond HTTP method)."""
-    text = f"{tool.name} {tool.description}"
-    if _DESTRUCTIVE_KEYWORDS.search(text):
+    """Refine safety using name + description keyword heuristics."""
+    combined = f"{tool.name} {tool.description}"
+    if _RE_DESTRUCTIVE.search(combined):
         return SafetyLevel.DESTRUCTIVE
-    if _WRITE_KEYWORDS.search(text):
+    if _RE_WRITE.search(combined):
         return SafetyLevel.WRITE
     return tool.safety
 
 
-# ── Description annotation ─────────────────────────────────────────────────
+# ── Description badges ─────────────────────────────────────────────────────
 
-
-_SAFETY_BADGES = {
+_BADGES: dict[SafetyLevel, str] = {
     SafetyLevel.READ: "",
     SafetyLevel.WRITE: " [WRITES DATA]",
-    SafetyLevel.DESTRUCTIVE: " [DESTRUCTIVE — may permanently delete data]",
+    SafetyLevel.DESTRUCTIVE: " [⚠️ DESTRUCTIVE — may permanently delete data]",
 }
 
 
-def _annotate_description(tool: ToolDefinition) -> str:
-    """Append safety badge to the tool description."""
-    badge = _SAFETY_BADGES.get(tool.safety, "")
+def _add_safety_badge(tool: ToolDefinition) -> str:
+    """Append a safety badge to the tool description if not already present."""
+    badge = _BADGES.get(tool.safety, "")
     if badge and badge not in tool.description:
         return tool.description + badge
     return tool.description
@@ -83,83 +77,79 @@ def _annotate_description(tool: ToolDefinition) -> str:
 
 # ── PII / secret redaction ─────────────────────────────────────────────────
 
-
-def _should_redact(name: str, patterns: list[str]) -> bool:
-    return any(re.search(p, name) for p in patterns)
-
-
-def _redact_params(tool: ToolDefinition, patterns: list[str]) -> None:
-    """Mark sensitive params so the generated server knows to mask them."""
-    for param in tool.params:
-        if _should_redact(param.name, patterns):
-            param.description = (
-                f"[REDACTED — sensitive field] {param.description}"
-            )
+def _is_sensitive(param_name: str, patterns: list[str]) -> bool:
+    """Return True if the parameter name matches any redaction pattern."""
+    return any(re.search(pat, param_name) for pat in patterns)
 
 
-# ── Public API ─────────────────────────────────────────────────────────────
+def _redact_sensitive_params(tool: ToolDefinition, patterns: list[str]) -> None:
+    """Prefix sensitive params with a [REDACTED] marker."""
+    for p in tool.params:
+        if _is_sensitive(p.name, patterns):
+            if not p.description.startswith("[REDACTED"):
+                p.description = f"[REDACTED — sensitive field] {p.description}"
 
+
+# ── Public entry point ─────────────────────────────────────────────────────
 
 def apply_safety(
     tools: list[ToolDefinition],
     policy: SafetyPolicy | None = None,
 ) -> list[ToolDefinition]:
-    """Apply safety classification and policy filtering to a tool list.
+    """Run the full safety pipeline: classify, filter, annotate, redact.
 
-    Returns a new list (tools that survive filtering) with updated
-    safety levels and descriptions.
+    Returns a new list containing only the tools that pass the policy.
     """
-    if policy is None:
-        policy = SafetyPolicy()
+    pol = policy or SafetyPolicy()
 
     with log_stage("Safety Classification") as logger:
-        result: list[ToolDefinition] = []
-        blocked: list[str] = []
+        accepted: list[ToolDefinition] = []
+        rejected: list[str] = []
 
         for tool in tools:
-            # 1. Re-classify based on keywords
-            old_safety = tool.safety
+            # Step 1 — keyword reclassification
+            prev = tool.safety
             tool.safety = reclassify_safety(tool)
-            if old_safety != tool.safety:
+            if prev != tool.safety:
                 logger.debug(
                     "  Reclassified '%s': %s → %s",
-                    tool.name, old_safety.value, tool.safety.value,
+                    tool.name, prev.value, tool.safety.value,
                 )
 
-            # 2. Allowlist / denylist
-            if policy.allowlist and tool.name not in policy.allowlist:
-                blocked.append(f"{tool.name} (not in allowlist)")
+            # Step 2 — allowlist / denylist filtering
+            if pol.allowlist and tool.name not in pol.allowlist:
+                rejected.append(f"{tool.name} (not in allowlist)")
                 continue
-            if tool.name in policy.denylist:
-                blocked.append(f"{tool.name} (denylisted)")
-                continue
-
-            # 3. Block destructive
-            if policy.block_destructive and tool.safety == SafetyLevel.DESTRUCTIVE:
-                blocked.append(f"{tool.name} (destructive blocked)")
+            if tool.name in pol.denylist:
+                rejected.append(f"{tool.name} (denylisted)")
                 continue
 
-            # 4. Annotate descriptions with safety badges
-            tool.description = _annotate_description(tool)
+            # Step 3 — block destructive if policy says so
+            if pol.block_destructive and tool.safety == SafetyLevel.DESTRUCTIVE:
+                rejected.append(f"{tool.name} (destructive blocked)")
+                continue
 
-            # 5. Redact sensitive params
-            _redact_params(tool, policy.redact_patterns)
+            # Step 4 — badge + redact
+            tool.description = _add_safety_badge(tool)
+            _redact_sensitive_params(tool, pol.redact_patterns)
 
-            result.append(tool)
+            accepted.append(tool)
 
-        # 6. Enforce max_tools
-        if policy.max_tools > 0:
-            result = result[: policy.max_tools]
+        # Step 5 — cap total tool count
+        if pol.max_tools > 0:
+            accepted = accepted[: pol.max_tools]
 
-        if blocked:
-            logger.info("Blocked %d tools: %s", len(blocked), blocked)
+        if rejected:
+            logger.info("Blocked %d tools: %s", len(rejected), rejected)
 
-        read = sum(1 for t in result if t.safety == SafetyLevel.READ)
-        write = sum(1 for t in result if t.safety == SafetyLevel.WRITE)
-        destructive = sum(1 for t in result if t.safety == SafetyLevel.DESTRUCTIVE)
+        counts = {
+            level: sum(1 for t in accepted if t.safety == level)
+            for level in SafetyLevel
+        }
         logger.info(
             "Passed %d tools (read=%d, write=%d, destructive=%d)",
-            len(result), read, write, destructive,
+            len(accepted), counts[SafetyLevel.READ],
+            counts[SafetyLevel.WRITE], counts[SafetyLevel.DESTRUCTIVE],
         )
 
-    return result
+    return accepted
